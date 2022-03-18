@@ -1,0 +1,1 @@
+# octosql-plugin-elasticsearch
