@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
 	"time"
 
 	"github.com/elastic/go-elasticsearch/v7"
@@ -24,7 +25,7 @@ type DatasourceExecuting struct {
 }
 
 func (d *DatasourceExecuting) Run(ctx ExecutionContext, produce ProduceFn, metaSend MetaSendFn) error {
-	placeholderValues := make([]interface{}, len(d.placeholderExprs))
+	placeholderValues := make([]any, len(d.placeholderExprs))
 	for i := range d.placeholderExprs {
 		value, err := d.placeholderExprs[i].Evaluate(ctx)
 		if err != nil {
@@ -34,7 +35,7 @@ func (d *DatasourceExecuting) Run(ctx ExecutionContext, produce ProduceFn, metaS
 		placeholderValues[i] = value.ToRawGoValue()
 	}
 
-	params := map[string]interface{}{}
+	params := map[string]any{}
 	sql := fmt.Sprintf(d.stmt, placeholderValues...)
 	params["query"] = sql
 	body, _ := json.Marshal(params)
@@ -43,46 +44,44 @@ func (d *DatasourceExecuting) Run(ctx ExecutionContext, produce ProduceFn, metaS
 		return fmt.Errorf("couldn't prepare statement '%s': %w", sql, err)
 	}
 
-	var data map[string]interface{}
-	json.NewDecoder(resp.Body).Decode(&data)
+	if resp.StatusCode != http.StatusOK {
+		var data ErrorResponse
+		err = json.NewDecoder(resp.Body).Decode(&data)
+		if err != nil {
+			panic(err)
+		}
+		return data.GetError()
+	}
 
-	var columns []map[string]interface{}
-	json.Unmarshal(func() []byte {
-		buf, _ := json.Marshal(data["columns"])
-		return buf
-	}(), &columns)
+	var data SQLQueryResponse
+	err = json.NewDecoder(resp.Body).Decode(&data)
+	if err != nil {
+		return fmt.Errorf("couldn't parse response: %w", err)
+	}
 
-	var rows [][]interface{}
-	json.Unmarshal(func() []byte {
-		buf, _ := json.Marshal(data["rows"])
-		return buf
-	}(), &rows)
-
-	log.Println(columns, rows)
-
-	for i := 0; i < len(rows); i++ {
-		recordValues := make([]octosql.Value, len(columns))
-		for j := 0; j < len(columns); j++ {
-			switch columns[j]["type"] {
+	for i := 0; i < len(data.Rows); i++ {
+		recordValues := make([]octosql.Value, len(data.Columns))
+		for j := 0; j < len(data.Columns); j++ {
+			switch data.Columns[j].Type {
 			case "long":
-				recordValues[j] = octosql.NewInt(int(rows[i][j].(float64)))
+				recordValues[j] = octosql.NewInt(int(data.Rows[i][j].(float64)))
 			case "float", "double":
-				recordValues[j] = octosql.NewFloat(rows[i][j].(float64))
+				recordValues[j] = octosql.NewFloat(data.Rows[i][j].(float64))
 			case "bool", "boolean":
-				recordValues[j] = octosql.NewBoolean(rows[i][j].(bool))
+				recordValues[j] = octosql.NewBoolean(data.Rows[i][j].(bool))
 			case "text", "keyword":
-				recordValues[j] = octosql.NewString(rows[i][j].(string))
+				recordValues[j] = octosql.NewString(data.Rows[i][j].(string))
 			case "date", "datetime":
-				value, err := time.Parse(time.RFC3339Nano, rows[i][j].(string))
+				value, err := time.Parse(time.RFC3339Nano, data.Rows[i][j].(string))
 				if err == nil {
 					recordValues[j] = octosql.NewTime(value)
 				} else {
 					recordValues[j] = octosql.NewNull()
 				}
-			case nil:
+			case "":
 				recordValues[j] = octosql.NewNull()
 			default:
-				log.Printf("unknown postgres value type, setting null: %T, %+v", rows[i][j], rows[i][j])
+				log.Printf("unknown postgres value type, setting null: %T, %+v", data.Rows[i][j], data.Rows[i][j])
 				recordValues[j] = octosql.NewNull()
 			}
 		}

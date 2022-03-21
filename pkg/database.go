@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"strings"
 
@@ -92,26 +93,27 @@ func (d *Database) GetTable(ctx context.Context, name string) (physical.Datasour
 		return nil, physical.Schema{}, fmt.Errorf("couldn't describe table: %w", err)
 	}
 
-	var data map[string]interface{}
-	json.NewDecoder(resp.Body).Decode(&data)
-	index := data[name].(map[string]interface{})
-	mappings := index["mappings"].(map[string]interface{})
-	properties := mappings["properties"].(map[string]interface{})
-
-	type FieldMeta struct {
-		Type        string `json:"type"`
-		Format      string `json:"format"`
-		IgnoreAbove int    `json:"ignore_above"`
+	if resp.StatusCode != http.StatusOK {
+		var data ErrorResponse
+		err = json.NewDecoder(resp.Body).Decode(&data)
+		if err != nil {
+			panic(err)
+		}
+		return nil, physical.Schema{}, data.GetError()
 	}
-	body, _ := json.Marshal(properties)
-	fieldRaws := map[string]FieldMeta{}
-	err = json.Unmarshal(body, &fieldRaws)
+
+	var data map[string]IndexMeta
+	err = json.NewDecoder(resp.Body).Decode(&data)
 	if err != nil {
+		panic(err)
+	}
+	meta, ok := data[name]
+	if !ok {
 		panic(err)
 	}
 
 	var descriptions [][]string
-	for fieldName, field := range fieldRaws {
+	for fieldName, field := range meta.Mappings.Properties {
 		if len(field.Type) == 0 {
 			fieldName = strings.TrimLeft(fieldName, "_")
 			switch fieldName {
